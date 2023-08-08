@@ -16,6 +16,10 @@ void kernelvec();
 
 extern int devintr();
 
+extern pte_t *walk(pagetable_t, uint64, int);
+extern void *memmove(void*, const void*, uint);
+extern int mappages(pagetable_t, uint64, uint64, uint64, int);
+
 void
 trapinit(void)
 {
@@ -33,6 +37,8 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
+extern uint8 referencecount[PHYSTOP/PGSIZE];
+
 void
 usertrap(void)
 {
@@ -67,7 +73,47 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if (r_scause() == 12 || r_scause() == 15) {
+    pte_t* pte;
+    uint64 pa, va;
+    uint flags;
+    char* mem;
+
+    va = r_stval();
+    if (va >= MAXVA) {
+      p->killed = 1;
+      exit(-1);
+    }
+
+    if ((pte = walk(p->pagetable, va, 0)) == 0) {
+      p->killed = 1;
+      exit(-1);
+    }
+    if ((*pte & PTE_V) == 0) {
+      p->killed = 1;
+      exit(-1);
+    }
+    if ((*pte & PTE_COW) == 0) {
+      p->killed = 1;
+      exit(-1);
+    }
+
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte) | PTE_W;
+    flags &= ~PTE_COW;
+    if ((mem = kalloc()) == 0) {
+      p->killed = 1;
+      exit(-1);
+    }
+    memmove(mem, (char*)pa, PGSIZE);
+    uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 1);
+
+    if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, flags) != 0) {
+      kfree(mem);
+      panic("cowhandler: mappages failed");
+    }
+  }
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
